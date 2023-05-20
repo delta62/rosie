@@ -59,15 +59,15 @@ impl WhisperContext {
             n_segments = whisper_full_n_segments(self.ctx);
         }
 
-        let mut ret = String::new();
-        for i in 0..n_segments {
-            let text = unsafe { whisper_full_get_segment_text(self.ctx, i) };
-            let s = unsafe { CStr::from_ptr(text) };
-            ret.push(' ');
-            ret.push_str(s.to_str().unwrap());
-        }
+        (0..n_segments)
+            .into_iter()
+            .map(|i| {
+                let text = unsafe { whisper_full_get_segment_text(self.ctx, i) };
+                let s = unsafe { CStr::from_ptr(text) };
 
-        ret
+                s.to_str().unwrap().trim().to_owned()
+            })
+            .collect()
     }
 }
 
