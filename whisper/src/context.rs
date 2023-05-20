@@ -33,7 +33,10 @@ impl Params {
             SamplingStrategy::BeamSearch => whisper_sampling_strategy_WHISPER_SAMPLING_BEAM_SEARCH,
         };
 
-        let params = unsafe { whisper_full_default_params(c_strat) };
+        let mut params = unsafe { whisper_full_default_params(c_strat) };
+
+        params.print_progress = false;
+
         Self { params }
     }
 }
