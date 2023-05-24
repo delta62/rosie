@@ -5,7 +5,10 @@ use rlua::{Function, Lua, Table};
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
 use std::{collections::HashMap, path::Path};
-use tokio::fs::{read_dir, read_to_string, DirEntry};
+use tokio::{
+    fs::{read_dir, read_to_string, DirEntry},
+    time::Duration,
+};
 use tokio_stream::wrappers::ReadDirStream;
 
 #[derive(Debug, Deserialize)]
@@ -14,12 +17,25 @@ struct Manifest {
     trigger_phrase: String,
 }
 
-pub struct AppHost {
-    apps: HashMap<String, Manifest>,
+#[derive(Debug)]
+pub struct Delayed {
+    app_id: String,
+    duration: Duration,
 }
 
-impl AppHost {
-    pub async fn from_dir<P: AsRef<Path>>(path: P) -> Result<Self> {
+pub struct AppHost<S>
+where
+    S: Fn(Delayed) + Send + Sync,
+{
+    apps: HashMap<String, Manifest>,
+    sender: S,
+}
+
+impl<S> AppHost<S>
+where
+    S: Fn(Delayed) + Send + Sync,
+{
+    pub async fn from_dir<P: AsRef<Path>>(path: P, sender: S) -> Result<Self> {
         let path = path.as_ref();
         let entries = read_dir(path).await.context(IoErr {
             path: path.to_str().unwrap().to_owned(),
@@ -35,7 +51,7 @@ impl AppHost {
             .try_collect()
             .await?;
 
-        Ok(AppHost { apps })
+        Ok(AppHost { apps, sender })
     }
 
     pub async fn dispatch(&self, command: &str) -> Result<()> {
@@ -48,7 +64,7 @@ impl AppHost {
             })?
             .0;
 
-        log::debug!("Found app {app_id} which can handle this command");
+        log::debug!("dispatching to app_id '{app_id}'");
         self.invoke_app(app_id, command).await?;
 
         Ok(())
@@ -64,33 +80,42 @@ impl AppHost {
         let ctx = Lua::new();
 
         ctx.context(|ctx| {
-            let api = ctx.create_table()?;
+            let result = ctx.scope(|scope| {
+                let api = ctx.create_table()?;
+                api.set(
+                    "delayed",
+                    scope.create_function(|_ctx, millis: u64| {
+                        println!("Schedule delayed task");
+                        let delayed = Delayed {
+                            app_id: app_id.to_owned(),
+                            duration: Duration::from_millis(millis),
+                        };
+                        (self.sender)(delayed);
+                        Ok(())
+                    })?,
+                )?;
 
-            api.set(
-                "delayed",
-                ctx.create_function(|_ctx, ()| {
-                    println!("Schedule delayed task");
-                    Ok(())
-                })?,
-            )?;
+                let chunk = ctx.load(&main);
+                chunk.exec().unwrap();
 
-            let chunk = ctx.load(&main);
-            chunk.exec().unwrap();
+                let globals = ctx.globals();
+                globals.set("api", api)?;
+                let main: Function = globals.get("main")?;
 
-            let globals = ctx.globals();
-            globals.set("api", api)?;
-            let main: Function = globals.get("main")?;
+                let args = ctx.create_table()?;
+                args.set("phrase", command)?;
 
-            let args = ctx.create_table()?;
-            args.set("phrase", command)?;
+                main.call::<Table, ()>(args)?;
 
-            main.call::<Table, ()>(args)?;
+                Ok::<(), rlua::Error>(())
+            });
 
-            Ok::<(), rlua::Error>(())
+            if let Err(e) = result {
+                log::error!("Oh noes: {e}");
+            }
+
+            Ok(())
         })
-        .unwrap();
-
-        Ok(())
     }
 }
 
